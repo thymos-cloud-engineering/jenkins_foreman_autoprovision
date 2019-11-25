@@ -1,0 +1,82 @@
+VM_hostgroup_title  = '"Ubuntu 18.04/Build Server"'
+VM_hostname         = 'Jenkins-EFI-'
+VM_compute_resource = '"NavInfo VMware cluster"'
+VM_subnet           = '"Navinfo Europe DHCP"'
+VM_interface        = '"compute_network=\'VM Network\'"'
+VM_compute_profile  = '"VMware Ubuntu 2x2"'
+
+def vm_ssh_test() { 
+    echo "Running vmsshtest"
+    sshagent(credentials: ['05a01fe7-9cbf-4ff4-a6c9-aa66fc71f791'] ) {
+        sh "ssh -o StrictHostKeyChecking=no -l root ${VM_hostname}$BUILD_ID ls /tmp"
+    }
+} 
+
+def vm_puppet_run() { 
+    echo "Running puppet agent -t"
+    sshagent(credentials: ['05a01fe7-9cbf-4ff4-a6c9-aa66fc71f791'] ) {
+        sh "ssh -o StrictHostKeyChecking=no -l root ${VM_hostname}$BUILD_ID puppet agent -t"
+    }
+} 
+
+pipeline {
+    agent any
+    options {
+        // Maximal run time of this pipeline
+        timeout(time: 1, unit: 'HOURS') 
+    }
+    stages {
+        stage('STAGE 1: Provision VM') {
+            steps {
+                sleep(time:40,unit:"SECONDS")
+                echo "Step 1: Create VM on ${VM_compute_resource} with hostname ${VM_hostname}$BUILD_ID"
+                sshagent(credentials: ['05a01fe7-9cbf-4ff4-a6c9-aa66fc71f791'] ) {
+                        sh "ssh -o StrictHostKeyChecking=no -l root 10.66.77.20 \
+                            'hammer host create \
+                            --hostgroup-title=${VM_hostgroup_title} \
+                            --name=\"${VM_hostname}${BUILD_ID}\" \
+                            --compute-resource=${VM_compute_resource} \
+                            --subnet=${VM_subnet} \
+                            --interface=${VM_interface} \
+                            --compute-profile=${VM_compute_profile} \
+                            --compute-attributes=\"firmware=automatic,bios=ef,start=1\" \
+                            --pxe-loader=\"Grub2 UEFI\" \
+                            --volume=\"size_gb=20,datastore=purestorage,thin=true\" \
+                            --volume=\"size_gb=10,datastore=purestorage,thin=true\" \
+                            --volume=\"size_gb=10,datastore=purestorage,thin=true\" ' "
+                        
+                }
+            }
+        }
+        stage('STAGE 2: Test SSH into VM to check when it is up') {
+            options {
+                // Maximal run time of this stage
+                timeout(time: 30, unit: 'MINUTES') 
+            }
+            steps {
+                sleep(time:13,unit:"MINUTES")
+                retry(60) {
+                    sleep(time:30,unit:"SECONDS")
+                    vm_ssh_test()
+                }
+            }
+        }
+        stage('STAGE 3: Run Puppet on the host') {
+            // First run has an 'exit 2' the next run should have 'exit 0'
+            steps {
+                retry(2) {
+                    vm_puppet_run()
+                }
+            }
+        }
+        stage('STAGE 4: Remove VM') {
+            steps {
+                sshagent(credentials: ['05a01fe7-9cbf-4ff4-a6c9-aa66fc71f791'] ) {
+                    sh "ssh -o StrictHostKeyChecking=no -l root 10.66.77.20 \
+                        'hammer host delete --name=\"${VM_hostname}${BUILD_ID}.navinfo.eu\" ' "
+                }
+            }
+        }
+        
+    }
+}
